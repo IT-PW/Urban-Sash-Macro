@@ -1,0 +1,47 @@
+QMainWindow {
+    background-color: #2d2d2d;
+    color: #e0e0e0;
+}
+
+QLabel {
+    color: #8ecae6;
+    font-size: 11pt;
+}
+
+QPushButton {
+    background-color: #219ebc;
+    color: white;
+    font-weight: bold;
+    padding: 6px 12px;
+    border: none;
+    border-radius: 4px;
+}
+
+QPushButton#close_output_btn {
+    background-color: transparent;
+    color: #ff6b6b;
+    font-weight: bold;
+    font-size: 12pt;
+}
+
+QCheckBox {
+    color: #8ecae6;
+    font-size: 10pt;
+}
+
+QListWidget {
+    font-family: Consolas;
+    font-size: 10pt;
+    background: #3a3a3a;
+    color: #e0e0e0;
+    border: 1px solid #666;
+}
+
+QTextEdit {
+    background-color: #1e1e1e;
+    color: #e0e0e0;
+    font-family: Courier;
+    font-size: 10pt;
+    padding: 8px;
+    border: 1px solid #555;
+}

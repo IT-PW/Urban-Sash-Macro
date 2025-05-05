@@ -1,0 +1,21 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.cache
+*.VC.db
+*.vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv
+
+# System
+.DS_Store
+Thumbs.db
+
+git-sync.bat
