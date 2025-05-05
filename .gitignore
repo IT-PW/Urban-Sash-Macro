@@ -17,3 +17,5 @@ __pycache__/
 # System
 .DS_Store
 Thumbs.db
+
+git-sync.bat
