@@ -1,5 +1,6 @@
 import sys
 import os
+from pathlib import Path
 from PyQt5.QtWidgets import (
     QMainWindow,
     QApplication,
@@ -10,9 +11,24 @@ from PyQt5.QtWidgets import (
     QFileDialog,
 )
 from PyQt5.QtGui import QPixmap, QFont
-from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5 import QtCore
 
-import resources_rc  # Make sure your Qt resource file is available
+import resources_rc  # ensure compiled resources are present (pyrcc5)
+
+# --------------------------
+# Configuration
+# --------------------------
+MIN_COLS = 24            # you index up to [23]
+ROUND_DENOM = 16         # round to 1/16ths
+ROUND_MODE = 'up'        # 'nearest' | 'up' | 'down'
+DEFAULT_OUTPUT_DIR = r"\\cor-fs2\CIMPLC\4590\Work"
+
+
+def _safe_float(val, default=0.0):
+    try:
+        return float(val)
+    except Exception:
+        return default
 
 
 class Ui_SashCartCompiler(object):
@@ -25,7 +41,9 @@ class Ui_SashCartCompiler(object):
         self.title = QLabel(Dialog)
         self.title.setGeometry(QtCore.QRect(0, 10, 500, 60))
         self.title.setAlignment(QtCore.Qt.AlignCenter)
-        self.title.setFont(QFont("Haettenschweiler", 36))
+        # font fallback (Haettenschweiler may not exist)
+        self.title.setFont(QFont("Haettenschweiler", 36) if QFont("Haettenschweiler").exactMatch()
+                           else QFont("", 28))
         self.title.setObjectName("title")
 
         # Sash image label
@@ -50,7 +68,7 @@ class Ui_SashCartCompiler(object):
         # Generate button
         self.generateButton = QPushButton(Dialog)
         self.generateButton.setGeometry(QtCore.QRect(130, 310, 231, 85))
-        font2 = QtGui.QFont()
+        font2 = QFont()
         font2.setPointSize(12)
         font2.setBold(True)
         font2.setWeight(75)
@@ -88,7 +106,7 @@ class SashCartCompilerWindow(QMainWindow, Ui_SashCartCompiler):
         super().__init__()
         self.setupUi(self)
 
-        # Load image from Qt resource system
+        # Load image from Qt resource system, with explicit fallback
         resource_pixmap = QPixmap(":/images/Sash.jpg")
         if not resource_pixmap.isNull():
             scaled = resource_pixmap.scaled(
@@ -98,16 +116,17 @@ class SashCartCompilerWindow(QMainWindow, Ui_SashCartCompiler):
             )
             self.sash.setPixmap(scaled)
         else:
-            # Fallback: load from local 'images' folder if resource not found
-            local_path = os.path.join(os.path.dirname(__file__), "images", "Sash.jpg")
-            if os.path.isfile(local_path):
-                local_pixmap = QPixmap(local_path)
+            local_path = Path(__file__).resolve().parent / "images" / "Sash.jpg"
+            if local_path.is_file():
+                local_pixmap = QPixmap(str(local_path))
                 scaled = local_pixmap.scaled(
                     self.sash.size(),
                     QtCore.Qt.KeepAspectRatio,
                     QtCore.Qt.SmoothTransformation,
                 )
                 self.sash.setPixmap(scaled)
+            else:
+                self.sash.setText("Image not found")
 
         # Internal list to hold selected file paths
         self.selected_files = []
@@ -117,127 +136,148 @@ class SashCartCompilerWindow(QMainWindow, Ui_SashCartCompiler):
         self.generateButton.clicked.connect(self.execute_process_files)
 
         # Default UNC output directory
-        self.default_output_dir = r"\\cor-fs2\CIMPLC\4590\Work"
+        self.default_output_dir = DEFAULT_OUTPUT_DIR
+
+    # ---------- helpers ----------
+
+    @staticmethod
+    def convert_to_fraction(decimal_str, denom=ROUND_DENOM, mode=ROUND_MODE):
+        """
+        Convert a decimal string into a reduced fraction string using the specified denominator (default 1/16ths).
+        mode: 'nearest' (round), 'up' (ceiling), 'down' (floor).
+        Examples (denom=16):
+          nearest: 12.03 -> 12 1/16,  12.06 -> 12 1/16,  12.09 -> 12 1/8,  12.999 -> 13
+          up:      12.01 -> 12 1/16,  12.06 -> 12 2/16 (-> 12 1/8),  12.00 -> 12
+          down:    12.09 -> 12 1/16
+        Handles negatives and carries at denom/denom -> whole+1.
+        """
+        import math
+        from math import gcd
+
+        try:
+            value = float(str(decimal_str).strip())
+        except Exception:
+            return str(decimal_str)
+
+        sign = "-" if value < 0 else ""
+        value = abs(value)
+
+        whole = int(value)
+        frac = value - whole
+
+        eps = 1e-12
+        if mode == 'up':
+            n = math.ceil(frac * denom - eps)
+        elif mode == 'down':
+            n = math.floor(frac * denom + eps)
+        else:  # nearest
+            n = int(round(frac * denom))
+
+        if n == denom:  # carry
+            whole += 1
+            n = 0
+
+        if n == 0:
+            return f"{sign}{whole}".strip()
+
+        g = gcd(n, denom)
+        n //= g
+        d = denom // g
+
+        if whole == 0:
+            return f"{sign}{n}/{d}".strip()
+        else:
+            return f"{sign}{whole} {n}/{d}".strip()
+
+    def _normalize_row(self, row, rownum, issues):
+        """Ensure rows have at least MIN_COLS columns; pad and record issues."""
+        if len(row) < MIN_COLS:
+            pad = MIN_COLS - len(row)
+            issues.append(f"Row {rownum}: padded {pad} missing column(s).")
+            row = row + [""] * pad
+        return row
+
+    # ---------- UI actions ----------
 
     def browse_files(self):
-        """
-        Open file dialog to select multiple sash input files.
-        Selected paths are stored in self.selected_files.
-        """
-        initial_dir = os.path.join(os.path.dirname(__file__), "..", "Sash")
-        if not os.path.isdir(initial_dir):
-            initial_dir = os.path.expanduser("~")
+        initial_dir = Path(__file__).resolve().parent.parent / "Sash"
+        if not initial_dir.is_dir():
+            initial_dir = Path.home()
 
         files, _ = QFileDialog.getOpenFileNames(
             self,
             "Select One or More Sash Files",
-            initial_dir,
+            str(initial_dir),
             "Text Files (*.txt *.csv);;All Files (*)",
         )
         if files:
             self.selected_files = files
-            # Display just the basenames in the line edit
             basenames = [os.path.basename(f) for f in files]
             self.inputLineEdit.setText("; ".join(basenames))
 
-    def convert_to_fraction(self, decimal_str):
-        """
-        Convert a decimal string into a fraction string (nearest 1/32).
-        Returns strings like "12 5/32" or "7/16" if less than 1.
-        """
-        try:
-            value = float(decimal_str)
-        except ValueError:
-            return decimal_str  # Return original if not a valid float
-
-        whole = int(value)
-        frac = round((value - whole) * 32)
-        lookup = {
-            0: "",
-            1: "1/32",
-            2: "1/16",
-            3: "3/32",
-            4: "1/8",
-            5: "5/32",
-            6: "3/16",
-            7: "7/32",
-            8: "1/4",
-            9: "9/32",
-            10: "5/16",
-            11: "11/32",
-            12: "3/8",
-            13: "13/32",
-            14: "7/16",
-            15: "15/32",
-            16: "1/2",
-            17: "17/32",
-            18: "9/16",
-            19: "19/32",
-            20: "5/8",
-            21: "21/32",
-            22: "11/16",
-            23: "23/32",
-            24: "3/4",
-            25: "25/32",
-            26: "13/16",
-            27: "27/32",
-            28: "7/8",
-            29: "29/32",
-            30: "15/16",
-            31: "31/32",
-        }
-        frac_str = lookup.get(frac, f"{frac}/32")
-        if whole == 0:
-            return frac_str
-        return f"{whole} {frac_str}".strip()
+    # ---------- core ----------
 
     def process_file(self, absolute_path):
         """
         Reads one sash file (absolute_path), converts dimensions/measurements
-        to fractions, applies swap logic, and writes output to the default UNC directory.
-        Returns (output_path, row_count).
+        to 1/16ths, applies swap logic, and writes output to the default UNC directory.
+        Returns (output_path, row_count, warnings_list).
         """
-        if not os.path.isfile(absolute_path):
+        p = Path(absolute_path)
+        if not p.is_file():
             raise FileNotFoundError(f"Cannot find file: {absolute_path}")
 
-        # Read and parse semicolon-delimited data
-        with open(absolute_path, "r", encoding="utf-8") as f:
-            data = [line.strip().split(";") for line in f if line.strip()]
+        issues = []
+        data = []
+        with p.open("r", encoding="utf-8") as f:
+            for i, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                parts = [c.strip() for c in line.split(";")]
+                parts = self._normalize_row(parts, i, issues)
+                data.append(parts)
 
         if not data:
             raise ValueError(f"Input file '{absolute_path}' is empty or improperly formatted.")
 
-        # Sort by cart number (column index 19)
-        data.sort(key=lambda r: float(r[19] or 0))
+        # Sort by cart number (col 19) safely
+        data.sort(key=lambda r: _safe_float(r[19], 0.0))
         alt_car = data[0][19]
 
         # Convert dimensions and measurements; reset flag column (index 4)
         for row in data:
             # Dimensions "width x height" in column 16
-            dims = row[16].split("x")
-            if len(dims) == 2:
-                w_str, h_str = dims[0].strip(), dims[1].strip()
-                w_frac = self.convert_to_fraction(w_str)
-                h_frac = self.convert_to_fraction(h_str)
-                row[16] = f'W {w_frac}" X H {h_frac}"'
+            dim_src = row[16]
+            if dim_src:
+                # handle 'x' or 'X'
+                dims_lower = dim_src.replace("X", "x")
+                dims = [s.strip() for s in dims_lower.split("x")]
+                if len(dims) == 2:
+                    w_frac = self.convert_to_fraction(dims[0])
+                    h_frac = self.convert_to_fraction(dims[1])
+                    if not w_frac:
+                        w_frac = "0"
+                    if not h_frac:
+                        h_frac = "0"
+                    row[16] = f'W {w_frac}" X H {h_frac}"'
 
-            # Convert single measure in column 18 if not already a fraction
-            if "/" not in row[18]:
+            # Convert single measure in column 18 if it doesn't already look fractional
+            if row[18] and "/" not in row[18]:
                 row[18] = self.convert_to_fraction(row[18])
 
             # Reset the flag to '0'
             row[4] = "0"
 
-        # Swap logic: find matching slots and swap cart info
+        # ---- Swap logic (fixed & deterministic) ----
+        # Build list of "empties" where other[4] == "1" within the same group (col 23), save group key.
         empty_slots = []
         for r in data:
             for other in data:
-                if (
-                        other[23] == r[23]
-                        and other[4] == "1"
-                        and other[20] != r[20]
-                ):
-                    empty_slots.append((other[19], other[20]))
+                if other[23] == r[23] and other[4] == "1" and other[20] != r[20]:
+                    # record slot to fill (cart, slot, group)
+                    empty_slots.append((other[19], other[20], r[23]))
+                    # move r's cart/slot into 'other' and clear flag
                     other[19], other[20], other[7], other[6], other[4] = (
                         r[19],
                         r[20],
@@ -246,74 +286,71 @@ class SashCartCompilerWindow(QMainWindow, Ui_SashCartCompiler):
                         "0",
                     )
 
-        for idx, (cart, slot) in enumerate(empty_slots):
+        # Now assign recorded empty slots to first available matching group rows
+        for cart, slot, group_key in empty_slots:
             for row in data:
-                if (
-                        row[23] == data[idx][23]
-                        and row[4] == "0"
-                        and row[19] != alt_car
-                ):
+                if row[23] == group_key and row[4] == "0" and row[19] != alt_car:
                     row[19], row[20], row[7], row[6] = cart, slot, cart, slot
+                    break  # fill each empty once
 
-        # Prepare output filename and path
-        data.sort(key=lambda r: float(r[0] or 0))
-        base_name = os.path.basename(absolute_path)
-        name_wo_ext = os.path.splitext(base_name)[0]
+        # Prepare output
+        data.sort(key=lambda r: _safe_float(r[0], 0.0))
+        name_wo_ext = p.stem
         out_name = f"{name_wo_ext}-SH.txt"
-        out_path = os.path.join(self.default_output_dir, out_name)
+        out_path = Path(self.default_output_dir) / out_name
 
-        # Ensure the output directory exists
-        if not os.path.isdir(self.default_output_dir):
-            raise FileNotFoundError(f"Output directory does not exist:\n{self.default_output_dir}")
+        # Ensure the output directory exists and is a directory
+        out_dir = Path(self.default_output_dir)
+        if not out_dir.exists():
+            raise FileNotFoundError(
+                f"Output directory does not exist (or is not accessible):\n{self.default_output_dir}"
+            )
+        if not out_dir.is_dir():
+            raise NotADirectoryError(f"Output path is not a directory:\n{self.default_output_dir}")
 
-        # Write to the UNC output directory
-        with open(out_path, "w", encoding="utf-8") as f:
+        # Write
+        with out_path.open("w", encoding="utf-8", newline="\n") as f:
             for row in data:
                 row[4] = "1"
                 f.write(";".join(row) + "\n")
 
-        return out_path, len(data)
+        return str(out_path), len(data), issues
 
     def execute_process_files(self):
-        """
-        Triggered when "Generate Files" button is clicked.
-        Processes each selected file (absolute path) and writes
-        output to the default UNC share. Displays status or errors.
-        """
-        # If the user used Browse to select files, self.selected_files holds them
+        # Build input paths from selection or textbox
         if self.selected_files:
             input_paths = self.selected_files
         else:
-            # Otherwise, try to interpret the line edit as a single absolute or relative path
             text = self.inputLineEdit.text().strip()
             if not text:
                 self.outputTextEdit.setPlainText("Please provide at least one filename.")
                 return
-            # Split on semicolon or comma if user pasted multiple basenames
             candidates = [p.strip() for p in text.replace(",", ";").split(";") if p.strip()]
-            input_paths = []
-            for cand in candidates:
-                if os.path.isabs(cand):
-                    input_paths.append(cand)
-                else:
-                    # Assume relative to ../Sash folder
-                    base_dir = os.path.dirname(__file__)
-                    rel_path = os.path.join(base_dir, "..", "Sash", cand)
-                    input_paths.append(rel_path)
+            base_dir = Path(__file__).resolve().parent.parent / "Sash"
+            input_paths = [
+                p if os.path.isabs(p) else str(base_dir / p)
+                for p in candidates
+            ]
 
-        output_messages = []
+        output_lines = []
         for file_path in input_paths:
             try:
-                out_path, count = self.process_file(file_path)
-                output_messages.append(f"• {os.path.basename(file_path)} → {os.path.basename(out_path)}: {count} rows")
+                out_path, count, issues = self.process_file(file_path)
+                line = f"• {os.path.basename(file_path)} → {os.path.basename(out_path)}: {count} rows"
+                if issues:
+                    line += f"  (warnings: {len(issues)})"
+                output_lines.append(line)
+                if issues:
+                    # show first few warnings; avoids spamming the UI
+                    output_lines.extend([f"   - {w}" for w in issues[:5]])
             except Exception as e:
-                output_messages.append(f"Error processing '{file_path}': {e}")
+                output_lines.append(f"Error processing '{file_path}': {e}")
 
         # Clear selected_files after processing
         self.selected_files = []
 
         # Display results
-        self.outputTextEdit.setPlainText("\n".join(output_messages))
+        self.outputTextEdit.setPlainText("\n".join(output_lines))
 
 
 if __name__ == "__main__":
