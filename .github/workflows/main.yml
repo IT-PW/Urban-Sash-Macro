@@ -2,18 +2,27 @@ name: Build Windows EXE
 
 on:
   push:
-    branches: [ main, master, develop, feature/** ]
-    tags: [ 'v*' ]
+    branches: ['**']          # <— build every branch
+    tags: ['v*']              # still build on version tags
   pull_request:
+    branches: ['**']          # PRs from any branch
   workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or tag to build (optional)'
+        required: false
+        default: ''
 
 jobs:
   build-windows:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout (triggering branch by default)
         uses: actions/checkout@v4
+        with:
+          # If manually dispatched with a ref input, use it. Otherwise use the event ref (current branch).
+          ref: ${{ github.event.inputs.ref != '' && github.event.inputs.ref || github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -25,24 +34,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Compile Qt resources if you track a .qrc (skip if you commit resources_rc.py)
       - name: Compile Qt resources (if .qrc present)
         shell: pwsh
         run: |
           if (Test-Path .\resources.qrc) {
             pyrcc5 .\resources.qrc -o .\resources_rc.py
-            Write-Host "Generated resources_rc.py"
-          } else {
-            Write-Host "No resources.qrc found; assuming resources_rc.py is committed"
           }
 
-      # Build EXE with PyInstaller
       - name: PyInstaller build
         shell: pwsh
         run: |
-          $Main = "SashCartCompiler.py"   # <-- change if your entry file has a different name
+          $Main = "SashCartCompiler.py"
           $Name = "SashCartCompiler"
-          # --onefile = single EXE; --windowed = no console; add images folder for local fallback
           pyinstaller `
             --noconfirm `
             --windowed `
@@ -58,27 +61,20 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SashCartCompiler-win
-          path: |
-            dist/SashCartCompiler.exe
-            dist/SashCartCompiler/**
+          name: SashCartCompiler-win-${{ github.ref_name }}-${{ github.sha }}
+          path: dist/SashCartCompiler.exe
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build-windows
     runs-on: ubuntu-latest
     steps:
-      - name: Download build artifact
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: SashCartCompiler-win
+          name: SashCartCompiler-win-${{ github.ref_name }}-${{ github.sha }}
           path: dist
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/SashCartCompiler.exe
-            dist/SashCartCompiler/**  # in case you switch to --onedir later
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          fil
