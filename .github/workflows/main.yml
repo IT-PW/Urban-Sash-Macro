@@ -1,60 +1,20 @@
 name: Build Windows EXE
 
-permissions:
-  contents: write  # needed for releases
-
 on:
-  push:
-    branches: ['**']
-    tags: ['v*']
-  pull_request:
-    branches: ['**']
   workflow_dispatch:
     inputs:
-      ref:
-        description: 'Branch or tag to build (optional)'
-        required: false
-        default: ''
       entrypoint:
-        description: 'Path to .py or .spec in this branch (e.g., src\main.py)'
-        required: false
+        description: 'Path to your Python entry file in THIS branch (e.g., src\main.py)'
+        required: true
         default: ''
 
 jobs:
-  build-windows:
-    runs-on: windows-2022  # pin to avoid image migration surprises
-    steps:
-      - name: Checkout (triggering ref by default)
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.ref != '' && github.event.inputs.ref || github.ref }}
-          fetch-depth: 0
+  build:
+    runs-on: windows-2022
 
-      - name: Determine entrypoint
-        shell: pwsh
-        run: |
-          $ep = '${{ github.event.inputs.entrypoint }}'
-          if (-not [string]::IsNullOrWhiteSpace($ep)) {
-            if (-not (Test-Path $ep)) { Write-Error "entrypoint '$ep' not found on this branch"; }
-            "ENTRYPOINT=$ep" | Out-File -FilePath $env:GITHUB_ENV -Append
-            if ($ep.ToLower().EndsWith('.spec')) { "USING_SPEC=true" | Out-File $env:GITHUB_ENV -Append }
-            exit 0
-          }
-          $candidates = @(
-            'SashCartCompiler.py','main.py','app.py',
-            'src\SashCartCompiler.py','src\main.py','src\app.py',
-            'gui\main.py','ui\main.py'
-          )
-          foreach ($c in $candidates) {
-            if (Test-Path $c) { "ENTRYPOINT=$c" | Out-File $env:GITHUB_ENV -Append; exit 0 }
-          }
-          $spec = Get-ChildItem -Recurse -Filter *.spec | Select-Object -First 1
-          if ($spec) {
-            "ENTRYPOINT=$($spec.FullName)" | Out-File $env:GITHUB_ENV -Append
-            "USING_SPEC=true" | Out-File $env:GITHUB_ENV -Append
-            exit 0
-          }
-          Write-Error "No obvious entrypoint found. Set 'entrypoint' when running the workflow."
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -62,7 +22,7 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install deps
+      - name: Install requirements and tools
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
@@ -70,52 +30,45 @@ jobs:
           pip install pyinstaller pyinstaller-hooks-contrib
           try { python -c "import PyQt5" } catch { pip install PyQt5 }
 
-      - name: Compile Qt resources if resources.qrc exists
+      - name: Compile Qt resources if .qrc exists
         shell: pwsh
         run: |
-          if (Test-Path .\resources.qrc) {
-            python -m PyQt5.pyrcc_main .\resources.qrc -o .\resources_rc.py
-            Write-Host "Generated resources_rc.py from resources.qrc"
-          } else {
-            Write-Host "No resources.qrc found — skipping."
+          $qrcs = @(Get-ChildItem -Recurse -Filter *.qrc)
+          foreach ($q in $qrcs) {
+            $out = Join-Path $q.DirectoryName 'resources_rc.py'
+            python -m PyQt5.pyrcc_main $q.FullName -o $out
+            Write-Host "Generated $out"
+          }
+          # Ensure a resources_rc.py sits next to the entrypoint if one exists anywhere
+          $entry = '${{ github.event.inputs.entrypoint }}'
+          $entryDir = Split-Path $entry -Parent
+          if ($entryDir -and $qrcs.Count -gt 0) {
+            $target = Join-Path $entryDir 'resources_rc.py'
+            if (-not (Test-Path $target)) {
+              python -m PyQt5.pyrcc_main $qrcs[0].FullName -o $target
+              Write-Host "Also generated $target for 'import resources_rc'."
+            }
           }
 
-      - name: PyInstaller build
+      - name: Build EXE
         shell: pwsh
         run: |
-          $Name = 'SashCartCompiler'
+          $ENTRY='${{ github.event.inputs.entrypoint }}'
+          if (-not (Test-Path $ENTRY)) { Write-Error "Entry file '$ENTRY' not found in this branch. Fix the path and re-run."; }
           $addData = @()
           if (Test-Path .\images) { $addData += '--add-data'; $addData += 'images;images' }
-          if ($env:USING_SPEC -eq 'true') {
-            pyinstaller --noconfirm "$env:ENTRYPOINT"
-          } else {
-            pyinstaller --noconfirm --windowed --onefile `
-              --name $Name `
-              --hidden-import PyQt5.sip `
-              --hidden-import PyQt5.QtCore `
-              --hidden-import PyQt5.QtGui `
-              --hidden-import PyQt5.QtWidgets `
-              @addData `
-              "$env:ENTRYPOINT"
-          }
+          pyinstaller --noconfirm --windowed --onefile `
+            --name App `
+            --hidden-import PyQt5.sip `
+            --hidden-import PyQt5.QtCore `
+            --hidden-import PyQt5.QtGui `
+            --hidden-import PyQt5.QtWidgets `
+            --hidden-import resources_rc `
+            @addData `
+            "$ENTRY"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SashCartCompiler-win-${{ github.ref_name }}-${{ github.sha }}
+          name: app-windows
           path: dist\*.exe
-
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build-windows
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: SashCartCompiler-win-${{ github.ref_name }}-${{ github.sha }}
-          path: dist
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*.exe
