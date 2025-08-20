@@ -5,8 +5,8 @@ permissions:
 
 on:
   push:
-    branches: ['**']          # build every branch
-    tags: ['v*']              # build on version tags (v1.2.3)
+    branches: ['**']
+    tags: ['v*']
   pull_request:
     branches: ['**']
   workflow_dispatch:
@@ -15,16 +15,46 @@ on:
         description: 'Branch or tag to build (optional)'
         required: false
         default: ''
+      entrypoint:
+        description: 'Path to .py or .spec in this branch (e.g., src\main.py)'
+        required: false
+        default: ''
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    runs-on: windows-2022  # pin to avoid image migration surprises
     steps:
       - name: Checkout (triggering ref by default)
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.ref != '' && github.event.inputs.ref || github.ref }}
           fetch-depth: 0
+
+      - name: Determine entrypoint
+        shell: pwsh
+        run: |
+          $ep = '${{ github.event.inputs.entrypoint }}'
+          if (-not [string]::IsNullOrWhiteSpace($ep)) {
+            if (-not (Test-Path $ep)) { Write-Error "entrypoint '$ep' not found on this branch"; }
+            "ENTRYPOINT=$ep" | Out-File -FilePath $env:GITHUB_ENV -Append
+            if ($ep.ToLower().EndsWith('.spec')) { "USING_SPEC=true" | Out-File $env:GITHUB_ENV -Append }
+            exit 0
+          }
+          $candidates = @(
+            'SashCartCompiler.py','main.py','app.py',
+            'src\SashCartCompiler.py','src\main.py','src\app.py',
+            'gui\main.py','ui\main.py'
+          )
+          foreach ($c in $candidates) {
+            if (Test-Path $c) { "ENTRYPOINT=$c" | Out-File $env:GITHUB_ENV -Append; exit 0 }
+          }
+          $spec = Get-ChildItem -Recurse -Filter *.spec | Select-Object -First 1
+          if ($spec) {
+            "ENTRYPOINT=$($spec.FullName)" | Out-File $env:GITHUB_ENV -Append
+            "USING_SPEC=true" | Out-File $env:GITHUB_ENV -Append
+            exit 0
+          }
+          Write-Error "No obvious entrypoint found. Set 'entrypoint' when running the workflow."
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,40 +66,49 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          if (Test-Path requirements.txt) { pip install -r requirements.txt }
+          if (Test-Path requirements.txt) { pip install -r requirements.txt } else { Write-Host "No requirements.txt found — continuing." }
           pip install pyinstaller pyinstaller-hooks-contrib
+          try { python -c "import PyQt5" } catch { pip install PyQt5 }
 
-      - name: Compile Qt resources (if .qrc present)
+      - name: Compile Qt resources if resources.qrc exists
         shell: pwsh
         run: |
           if (Test-Path .\resources.qrc) {
             python -m PyQt5.pyrcc_main .\resources.qrc -o .\resources_rc.py
+            Write-Host "Generated resources_rc.py from resources.qrc"
+          } else {
+            Write-Host "No resources.qrc found — skipping."
           }
 
       - name: PyInstaller build
         shell: pwsh
         run: |
-          $Main = "SashCartCompiler.py"
-          $Name = "SashCartCompiler"
-          pyinstaller --noconfirm --windowed --onefile `
-            --name $Name `
-            --hidden-import PyQt5.sip `
-            --hidden-import PyQt5.QtCore `
-            --hidden-import PyQt5.QtGui `
-            --hidden-import PyQt5.QtWidgets `
-            --add-data "images;images" `
-            $Main
+          $Name = 'SashCartCompiler'
+          $addData = @()
+          if (Test-Path .\images) { $addData += '--add-data'; $addData += 'images;images' }
+          if ($env:USING_SPEC -eq 'true') {
+            pyinstaller --noconfirm "$env:ENTRYPOINT"
+          } else {
+            pyinstaller --noconfirm --windowed --onefile `
+              --name $Name `
+              --hidden-import PyQt5.sip `
+              --hidden-import PyQt5.QtCore `
+              --hidden-import PyQt5.QtGui `
+              --hidden-import PyQt5.QtWidgets `
+              @addData `
+              "$env:ENTRYPOINT"
+          }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: SashCartCompiler-win-${{ github.ref_name }}-${{ github.sha }}
-          path: dist/SashCartCompiler.exe
+          path: dist\*.exe
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: build-windows
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Download artifact
         uses: actions/download-artifact@v4
@@ -79,4 +118,125 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/SashCartCompiler.exe
+          files: dist/*.exe
+name: Build Windows EXE
+
+permissions:
+  contents: write  # needed for releases
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+    branches: ['**']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or tag to build (optional)'
+        required: false
+        default: ''
+      entrypoint:
+        description: 'Path to .py or .spec in this branch (e.g., src\main.py)'
+        required: false
+        default: ''
+
+jobs:
+  build-windows:
+    runs-on: windows-2022  # pin to avoid image migration surprises
+    steps:
+      - name: Checkout (triggering ref by default)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref != '' && github.event.inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - name: Determine entrypoint
+        shell: pwsh
+        run: |
+          $ep = '${{ github.event.inputs.entrypoint }}'
+          if (-not [string]::IsNullOrWhiteSpace($ep)) {
+            if (-not (Test-Path $ep)) { Write-Error "entrypoint '$ep' not found on this branch"; }
+            "ENTRYPOINT=$ep" | Out-File -FilePath $env:GITHUB_ENV -Append
+            if ($ep.ToLower().EndsWith('.spec')) { "USING_SPEC=true" | Out-File $env:GITHUB_ENV -Append }
+            exit 0
+          }
+          $candidates = @(
+            'SashCartCompiler.py','main.py','app.py',
+            'src\SashCartCompiler.py','src\main.py','src\app.py',
+            'gui\main.py','ui\main.py'
+          )
+          foreach ($c in $candidates) {
+            if (Test-Path $c) { "ENTRYPOINT=$c" | Out-File $env:GITHUB_ENV -Append; exit 0 }
+          }
+          $spec = Get-ChildItem -Recurse -Filter *.spec | Select-Object -First 1
+          if ($spec) {
+            "ENTRYPOINT=$($spec.FullName)" | Out-File $env:GITHUB_ENV -Append
+            "USING_SPEC=true" | Out-File $env:GITHUB_ENV -Append
+            exit 0
+          }
+          Write-Error "No obvious entrypoint found. Set 'entrypoint' when running the workflow."
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install deps
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path requirements.txt) { pip install -r requirements.txt } else { Write-Host "No requirements.txt found — continuing." }
+          pip install pyinstaller pyinstaller-hooks-contrib
+          try { python -c "import PyQt5" } catch { pip install PyQt5 }
+
+      - name: Compile Qt resources if resources.qrc exists
+        shell: pwsh
+        run: |
+          if (Test-Path .\resources.qrc) {
+            python -m PyQt5.pyrcc_main .\resources.qrc -o .\resources_rc.py
+            Write-Host "Generated resources_rc.py from resources.qrc"
+          } else {
+            Write-Host "No resources.qrc found — skipping."
+          }
+
+      - name: PyInstaller build
+        shell: pwsh
+        run: |
+          $Name = 'SashCartCompiler'
+          $addData = @()
+          if (Test-Path .\images) { $addData += '--add-data'; $addData += 'images;images' }
+          if ($env:USING_SPEC -eq 'true') {
+            pyinstaller --noconfirm "$env:ENTRYPOINT"
+          } else {
+            pyinstaller --noconfirm --windowed --onefile `
+              --name $Name `
+              --hidden-import PyQt5.sip `
+              --hidden-import PyQt5.QtCore `
+              --hidden-import PyQt5.QtGui `
+              --hidden-import PyQt5.QtWidgets `
+              @addData `
+              "$env:ENTRYPOINT"
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SashCartCompiler-win-${{ github.ref_name }}-${{ github.sha }}
+          path: dist\*.exe
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-windows
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: SashCartCompiler-win-${{ github.ref_name }}-${{ github.sha }}
+          path: dist
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
