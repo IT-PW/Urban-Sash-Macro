@@ -1,5 +1,7 @@
 import sys
 import os
+import math
+from fractions import Fraction
 from PyQt5.QtWidgets import (
     QMainWindow,
     QApplication,
@@ -12,7 +14,17 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QPixmap, QFont
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-import resources_rc  # Make sure your Qt resource file is available
+# Try to load Qt resources; if not present, we'll fall back to disk images.
+try:
+    import resources_rc  # provides the :/images/... resources
+except Exception:
+    resources_rc = None
+
+
+def resource_path(rel):
+    """PyInstaller-safe path to bundled files (works for onefile/onedir)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(__file__))
+    return os.path.join(base, rel)
 
 
 class Ui_SashCartCompiler(object):
@@ -88,7 +100,7 @@ class SashCartCompilerWindow(QMainWindow, Ui_SashCartCompiler):
         super().__init__()
         self.setupUi(self)
 
-        # Load image from Qt resource system
+        # Try Qt-embedded image first; fall back to disk bundle.
         resource_pixmap = QPixmap(":/images/Sash.jpg")
         if not resource_pixmap.isNull():
             scaled = resource_pixmap.scaled(
@@ -98,8 +110,7 @@ class SashCartCompilerWindow(QMainWindow, Ui_SashCartCompiler):
             )
             self.sash.setPixmap(scaled)
         else:
-            # Fallback: load from local 'images' folder if resource not found
-            local_path = os.path.join(os.path.dirname(__file__), "images", "Sash.jpg")
+            local_path = resource_path(os.path.join("images", "Sash.jpg"))
             if os.path.isfile(local_path):
                 local_pixmap = QPixmap(local_path)
                 scaled = local_pixmap.scaled(
@@ -120,10 +131,7 @@ class SashCartCompilerWindow(QMainWindow, Ui_SashCartCompiler):
         self.default_output_dir = r"\\cor-fs2\CIMPLC\4590\Work"
 
     def browse_files(self):
-        """
-        Open file dialog to select multiple sash input files.
-        Selected paths are stored in self.selected_files.
-        """
+        """Open file dialog to select multiple sash input files."""
         initial_dir = os.path.join(os.path.dirname(__file__), "..", "Sash")
         if not os.path.isdir(initial_dir):
             initial_dir = os.path.expanduser("~")
@@ -136,60 +144,46 @@ class SashCartCompilerWindow(QMainWindow, Ui_SashCartCompiler):
         )
         if files:
             self.selected_files = files
-            # Display just the basenames in the line edit
             basenames = [os.path.basename(f) for f in files]
             self.inputLineEdit.setText("; ".join(basenames))
 
+    # ---------- NEW ROUNDING: ceil to next 1/16" ----------
     def convert_to_fraction(self, decimal_str):
         """
-        Convert a decimal string into a fraction string (nearest 1/32).
-        Returns strings like "12 5/32" or "7/16" if less than 1.
+        Always round UP to the next 1/16".
+        Returns mixed fractions like '12 3/16' or just '3/16' if < 1.
         """
         try:
             value = float(decimal_str)
         except ValueError:
-            return decimal_str  # Return original if not a valid float
+            return decimal_str
 
-        whole = int(value)
-        frac = round((value - whole) * 32)
-        lookup = {
-            0: "",
-            1: "1/32",
-            2: "1/16",
-            3: "3/32",
-            4: "1/8",
-            5: "5/32",
-            6: "3/16",
-            7: "7/32",
-            8: "1/4",
-            9: "9/32",
-            10: "5/16",
-            11: "11/32",
-            12: "3/8",
-            13: "13/32",
-            14: "7/16",
-            15: "15/32",
-            16: "1/2",
-            17: "17/32",
-            18: "9/16",
-            19: "19/32",
-            20: "5/8",
-            21: "21/32",
-            22: "11/16",
-            23: "23/32",
-            24: "3/4",
-            25: "25/32",
-            26: "13/16",
-            27: "27/32",
-            28: "7/8",
-            29: "29/32",
-            30: "15/16",
-            31: "31/32",
-        }
-        frac_str = lookup.get(frac, f"{frac}/32")
-        if whole == 0:
-            return frac_str
-        return f"{whole} {frac_str}".strip()
+        neg = value < 0
+        v = abs(value)
+
+        whole = int(v)
+        frac = v - whole
+
+        # round UP fractional part to next 1/16
+        sixteenths = math.ceil(frac * 16)
+
+        # carry if we hit 16/16 (e.g., 1.999 -> 2)
+        if sixteenths >= 16:
+            whole += 1
+            sixteenths = 0
+
+        if sixteenths == 0:
+            out = f"{whole}"
+        else:
+            # reduce to neat fraction (8/16 -> 1/2, 2/16 -> 1/8, etc.)
+            f = Fraction(sixteenths, 16).limit_denominator(16)
+            if whole == 0:
+                out = f"{f.numerator}/{f.denominator}"
+            else:
+                out = f"{whole} {f.numerator}/{f.denominator}"
+
+        return f"-{out}" if neg else out
+    # ------------------------------------------------------
 
     def process_file(self, absolute_path):
         """
@@ -233,9 +227,9 @@ class SashCartCompilerWindow(QMainWindow, Ui_SashCartCompiler):
         for r in data:
             for other in data:
                 if (
-                        other[23] == r[23]
-                        and other[4] == "1"
-                        and other[20] != r[20]
+                    other[23] == r[23]
+                    and other[4] == "1"
+                    and other[20] != r[20]
                 ):
                     empty_slots.append((other[19], other[20]))
                     other[19], other[20], other[7], other[6], other[4] = (
@@ -249,9 +243,9 @@ class SashCartCompilerWindow(QMainWindow, Ui_SashCartCompiler):
         for idx, (cart, slot) in enumerate(empty_slots):
             for row in data:
                 if (
-                        row[23] == data[idx][23]
-                        and row[4] == "0"
-                        and row[19] != alt_car
+                    row[23] == data[idx][23]
+                    and row[4] == "0"
+                    and row[19] != alt_car
                 ):
                     row[19], row[20], row[7], row[6] = cart, slot, cart, slot
 
@@ -284,7 +278,6 @@ class SashCartCompilerWindow(QMainWindow, Ui_SashCartCompiler):
         if self.selected_files:
             input_paths = self.selected_files
         else:
-            # Otherwise, try to interpret the line edit as a single absolute or relative path
             text = self.inputLineEdit.text().strip()
             if not text:
                 self.outputTextEdit.setPlainText("Please provide at least one filename.")
